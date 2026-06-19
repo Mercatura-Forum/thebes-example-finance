@@ -1,28 +1,26 @@
 /**
- * MemphisGate — Memphis passkey sign-in as the app's web auth.
+ * MemphisGate — open-demo wrapper with Memphis passkey sign-in on demand.
  *
- * Wrap the app's routes in <MemphisGate appName="…">. Until the visitor signs
- * in with a passkey, the gate shows a sign-in card; once signed in, it renders
- * the app and exposes the session via useAuth() so the header can greet the
- * user and offer sign-out. Memphis (cid 921) provides the human identity +
- * display name; the on-chain caller stays the boundary's persisted browser key.
- *
- * This file is identical across every Thebes example — copy it as-is. Only the
- * per-app `--color-accent` token (in index.css) and the appName/tagline props
- * differ, so the gate always looks native to its host app.
+ * This is a public demo: anyone can roam the app without signing in. Memphis
+ * passkey sign-in is offered in the header (SignOutChip) and prompted only when
+ * a visitor wants a persistent identity. Sign-in attaches a human display name;
+ * the on-chain caller is the boundary's persisted browser key either way, so
+ * reads and writes work for guests too. Same API as every other Thebes example
+ * (wrap routes in <MemphisGate>, read the session via useAuth(), sign in / out
+ * via SignOutChip); the styling follows the host app's CSS tokens.
  */
 import { type ReactNode } from 'react';
 import { type MemphisAuth } from './useMemphis.js';
-/** The signed-in Memphis session + sign-out. Throws if used outside the gate. */
+/** The Memphis session (signed in or guest). Throws if used outside the gate. */
 export declare function useAuth(): MemphisAuth;
-export declare function MemphisGate({ appName, tagline, children }: {
-    appName: string;
+/** Open demo: always render the app. Sign-in is on demand via SignOutChip. */
+export declare function MemphisGate({ children }: {
+    appName?: string;
     tagline?: string;
     children: ReactNode;
 }): import("react").JSX.Element;
-/** Compact "signed in as … · Sign out" chip for app headers. Native-looking;
- *  the accent comes from --color-accent. */
+/** Header auth control. Guests get a "Sign in" affordance; signed-in users see
+ *  their name and a sign-out link. */
 export declare function SignOutChip({ className }: {
     className?: string;
 }): import("react").JSX.Element;
-//# sourceMappingURL=MemphisGate.d.ts.map
