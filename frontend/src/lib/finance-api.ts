@@ -23,6 +23,7 @@ export interface Tx {
   note: string
   receiptPath: string // "" when none
   timestamp: bigint
+  transferId: bigint // 0 = standalone; >0 links the two legs of a transfer
 }
 export interface BudgetRow {
   category: string
@@ -52,6 +53,7 @@ const TX_FIELDS = [
   { name: 'note', type: 'text' as const },
   { name: 'receiptPath', type: 'text' as const },
   { name: 'timestamp', type: 'int' as const },
+  { name: 'transferId', type: 'nat' as const },
 ]
 const BUDGET_FIELDS = [
   { name: 'category', type: 'text' as const },
@@ -126,3 +128,68 @@ export async function seedDemo(): Promise<void> {
 }
 
 export { query, FINANCE_CID }
+
+// ── v2 surface: transfers, net worth, cashflow, the seal, the oracle ──
+import { calibrate } from './chainTime'
+import { decodeNat } from '@thebes/sdk'
+
+export interface NetWorth {
+  assetsCents: bigint; creditCents: bigint; netCents: bigint; accounts: bigint; nowNs: bigint
+}
+export interface CashflowBucket { bucketStartNs: bigint; incomeCents: bigint; expenseCents: bigint }
+export interface FinanceSeal {
+  accounts: bigint; transactions: bigint; storedSumCents: bigint; ledgerSumCents: bigint
+  inconsistentAccounts: bigint; checkedAt: bigint
+}
+export interface ViolationRow { rule: string; detail: string }
+
+const NETWORTH_FIELDS = [
+  { name: 'assetsCents', type: 'int' as const }, { name: 'creditCents', type: 'int' as const },
+  { name: 'netCents', type: 'int' as const }, { name: 'accounts', type: 'nat' as const },
+  { name: 'nowNs', type: 'int' as const },
+]
+const CASHFLOW_FIELDS = [
+  { name: 'bucketStartNs', type: 'int' as const }, { name: 'incomeCents', type: 'nat' as const },
+  { name: 'expenseCents', type: 'nat' as const },
+]
+const SEAL_FIELDS = [
+  { name: 'accounts', type: 'nat' as const }, { name: 'transactions', type: 'nat' as const },
+  { name: 'storedSumCents', type: 'int' as const }, { name: 'ledgerSumCents', type: 'int' as const },
+  { name: 'inconsistentAccounts', type: 'nat' as const }, { name: 'checkedAt', type: 'int' as const },
+]
+const VIOLATION_FIELDS = [{ name: 'rule', type: 'text' as const }, { name: 'detail', type: 'text' as const }]
+
+export const decodeNetWorth = (h: string) => {
+  const rows = decodeVecRecord(h, NETWORTH_FIELDS) as unknown as NetWorth[]
+  if (rows.length > 0) calibrate(rows[0].nowNs)
+  return rows[0]
+}
+export const decodeCashflow = (h: string) => decodeVecRecord(h, CASHFLOW_FIELDS) as unknown as CashflowBucket[]
+export const decodeSeal = (h: string) => {
+  const rows = decodeVecRecord(h, SEAL_FIELDS) as unknown as FinanceSeal[]
+  if (rows.length > 0) calibrate(rows[0].checkedAt)
+  return rows[0]
+}
+export const decodeViolations = (h: string) => decodeVecRecord(h, VIOLATION_FIELDS) as unknown as ViolationRow[]
+
+export const M2 = {
+  netWorth: 'netWorthView', cashflow: 'cashflowView', seal: 'financeSealView', invariants: 'invariantReportView',
+} as const
+
+export const cashflowArgs = (startNs: bigint, endNs: bigint, buckets: number) =>
+  encodeArgs([{ type: 'int', value: startNs }, { type: 'int', value: endNs }, { type: 'nat', value: BigInt(buckets) }])
+
+/** Move money between two of YOUR accounts — double-entry, atomic, oracle-checked. */
+export async function transfer(fromId: bigint, toId: bigint, amountCents: bigint, note: string): Promise<bigint> {
+  const r = await update(FINANCE_CID, 'transferOrTrap', encodeArgs([
+    { type: 'nat', value: fromId }, { type: 'nat', value: toId },
+    { type: 'nat', value: amountCents }, { type: 'text', value: note },
+  ]))
+  return decodeNat(r.reply_hex ?? r.reply ?? '')
+}
+
+/** One-shot chain-clock calibration (net worth carries nowNs). */
+export async function calibrateChainClock(): Promise<void> {
+  const r = await query(FINANCE_CID, 'netWorthView')
+  decodeNetWorth(r.reply_hex ?? r.reply ?? '')
+}

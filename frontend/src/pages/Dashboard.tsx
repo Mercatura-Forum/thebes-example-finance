@@ -1,13 +1,25 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@thebes/sdk'
-import { FINANCE_CID, M, decodeAccounts, createAccount, seedDemo, type Account } from '../lib/finance-api'
+import {
+  FINANCE_CID, M, M2, decodeAccounts, decodeNetWorth, decodeCashflow, cashflowArgs,
+  createAccount, seedDemo, type Account, type NetWorth, type CashflowBucket,
+} from '../lib/finance-api'
+import { trailingWindow, fmtCents } from '../lib/config'
+import { useCalibrated } from '../lib/useCalibrated'
+import { Strata } from '../components/Strata'
 import { Money, Button, Spinner, EmptyState, ErrorNote } from '../components/ui'
 
 const KINDS = ['checking', 'savings', 'cash', 'credit'] as const
 
 export function Dashboard() {
   const { data, loading, error, refetch } = useQuery<Account[]>(FINANCE_CID, M.accounts, undefined, decodeAccounts)
+  const cal = useCalibrated()
+  const worth = useQuery<NetWorth | undefined>(FINANCE_CID, M2.netWorth, undefined, decodeNetWorth)
+  const [cfStart, cfEnd] = trailingWindow(30)
+  const cashflow = useQuery<CashflowBucket[]>(
+    FINANCE_CID, M2.cashflow, cashflowArgs(cfStart, cfEnd, 30), decodeCashflow, [cal ? 1 : 0],
+  )
   const [open, setOpen] = useState(false)
   const [name, setName] = useState('')
   const [kind, setKind] = useState<(typeof KINDS)[number]>('checking')
@@ -48,13 +60,21 @@ export function Dashboard() {
 
   return (
     <div className="space-y-8">
-      {/* Net-worth hero — the number first; accounts beneath (the Maybe pattern). */}
-      <section className="card p-6">
-        <p className="text-xs uppercase tracking-[0.18em] text-ink-soft">Net worth</p>
-        <p className="font-display mt-1 text-4xl font-bold md:text-5xl">
-          <Money cents={netWorth} />
-        </p>
-        <p className="mt-1 text-sm text-ink-soft nums">{accounts.length} account{accounts.length === 1 ? '' : 's'}</p>
+      {/* Net-worth hero over the strata — thirty days of real cashflow. */}
+      <section className="hero relative overflow-hidden p-6 sm:p-7">
+        <div className="relative z-10">
+          <p className="hero-kicker">Ledger-verified on-chain</p>
+          <p className="font-display mt-2 text-4xl font-bold md:text-5xl">
+            <Money cents={worth.data?.netCents ?? netWorth} />
+          </p>
+          <p className="mt-1 text-sm text-ink-soft nums">
+            net worth · {accounts.length} account{accounts.length === 1 ? '' : 's'}
+            {worth.data && Number(worth.data.creditCents) !== 0 && (
+              <> · ${fmtCents(worth.data.assetsCents)} assets − ${fmtCents(-worth.data.creditCents)} on credit</>
+            )}
+          </p>
+        </div>
+        <Strata buckets={cashflow.data ?? []} className="mt-3 h-[230px] w-full" />
       </section>
 
       <section>
