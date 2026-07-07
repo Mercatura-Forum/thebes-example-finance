@@ -1,25 +1,39 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@thebes/sdk'
+import { useEffect } from 'react'
 import {
-  FINANCE_CID, M, M2, decodeAccounts, decodeNetWorth, decodeCashflow, cashflowArgs,
-  createAccount, seedDemo, type Account, type NetWorth, type CashflowBucket,
+  FINANCE_CID, M, M2, decodeAccounts, decodeNetWorth, decodeTxs, txsArgs, query,
+  createAccount, seedDemo, type Account, type NetWorth, type Tx,
 } from '../lib/finance-api'
-import { trailingWindow, fmtCents } from '../lib/config'
-import { useCalibrated } from '../lib/useCalibrated'
-import { Strata } from '../components/Strata'
+import { fmtCents } from '../lib/config'
+import { Strata, type StrataTx } from '../components/Strata'
 import { Money, Button, Spinner, EmptyState, ErrorNote } from '../components/ui'
 
 const KINDS = ['checking', 'savings', 'cash', 'credit'] as const
 
 export function Dashboard() {
   const { data, loading, error, refetch } = useQuery<Account[]>(FINANCE_CID, M.accounts, undefined, decodeAccounts)
-  const cal = useCalibrated()
   const worth = useQuery<NetWorth | undefined>(FINANCE_CID, M2.netWorth, undefined, decodeNetWorth)
-  const [cfStart, cfEnd] = trailingWindow(30)
-  const cashflow = useQuery<CashflowBucket[]>(
-    FINANCE_CID, M2.cashflow, cashflowArgs(cfStart, cfEnd, 30), decodeCashflow, [cal ? 1 : 0],
-  )
+  // The strata draw from the caller's full posting sequence, merged across
+  // accounts in time order (each account view is newest-first; we merge then
+  // reverse into ledger order).
+  const [strata, setStrata] = useState<StrataTx[]>([])
+  useEffect(() => {
+    const ids = (data ?? []).map((a) => a.id)
+    if (ids.length === 0) { setStrata([]); return }
+    ;(async () => {
+      const all: Tx[] = []
+      for (const id of ids) {
+        try {
+          const r = await query(FINANCE_CID, M.txs, txsArgs(id))
+          all.push(...decodeTxs(r.reply_hex ?? r.reply ?? ''))
+        } catch { /* an account with no read access never happens for own ids */ }
+      }
+      all.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : Number(a.id - b.id)))
+      setStrata(all.map((t) => ({ kind: t.kind, amountCents: t.amountCents, category: t.category, transferId: t.transferId })))
+    })()
+  }, [data])
   const [open, setOpen] = useState(false)
   const [name, setName] = useState('')
   const [kind, setKind] = useState<(typeof KINDS)[number]>('checking')
@@ -74,7 +88,7 @@ export function Dashboard() {
             )}
           </p>
         </div>
-        <Strata buckets={cashflow.data ?? []} className="mt-3 h-[230px] w-full" />
+        <Strata txs={strata} className="mt-3 h-[230px] w-full" />
       </section>
 
       <section>

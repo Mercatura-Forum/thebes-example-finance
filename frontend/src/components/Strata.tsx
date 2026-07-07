@@ -1,17 +1,24 @@
 import { useEffect, useRef } from 'react'
-import type { CashflowBucket } from '../lib/finance-api'
-import { wallDate } from '../lib/chainTime'
+
+/** One posting, already merged + time-ordered across the caller's accounts. */
+export interface StrataTx {
+  kind: string // income | expense
+  amountCents: bigint
+  category: string
+  transferId: bigint
+}
 
 /**
- * Strata — the ledger's emblem: thirty days of REAL cashflow as terraced
- * sediment. Income lays emerald strata above the baseline, spending cuts red
- * strata below it, and the gold ridge walking across is the running net —
- * every step drawn from the transaction log the oracle audits. The dashed
+ * Strata — the ledger's emblem: the caller's REAL postings as terraced
+ * sediment, one column per transaction in ledger order. Income lays emerald
+ * strata above the baseline, spending cuts red strata below, transfers are
+ * hatched (they conserve, never create), and the gold ridge walking across is
+ * the running net — the exact sequence the oracle re-proves. The dashed
  * bedrock line is the no-overdraft floor the contract enforces. Crisp steps,
  * not smooth curves: this is a ledger, not a mood chart. Static under
  * prefers-reduced-motion; pauses offscreen.
  */
-export function Strata({ buckets, className = '' }: { buckets: CashflowBucket[]; className?: string }) {
+export function Strata({ txs, className = '' }: { txs: StrataTx[]; className?: string }) {
   const host = useRef<HTMLDivElement>(null)
   const canvas = useRef<HTMLCanvasElement>(null)
 
@@ -43,26 +50,26 @@ export function Strata({ buckets, className = '' }: { buckets: CashflowBucket[];
     const ro = new ResizeObserver(resize)
     ro.observe(el)
 
-    const inc = buckets.map((b) => Number(b.incomeCents))
-    const exp = buckets.map((b) => Number(b.expenseCents))
-    let net = 0
-    const nets = buckets.map((_b, i) => (net += inc[i] - exp[i]))
-    const maxBar = Math.max(...inc, ...exp, 1)
+    const amounts = txs.map((t) => Number(t.amountCents))
+    const signs = txs.map((t) => (t.kind === 'income' ? 1 : -1))
+    let run = 0
+    const nets = txs.map((_t, i) => (run += signs[i] * amounts[i]))
+    const maxBar = Math.max(...amounts, 1)
     const maxNet = Math.max(...nets.map(Math.abs), 1)
 
     function draw(tMs: number) {
-      if (!ctx || buckets.length === 0) return
+      if (!ctx || txs.length === 0) return
       const isDark = dark()
       ctx.clearRect(0, 0, W, H)
       const padL = 8
       const padR = 8
       const baseY = H * 0.56
-      const bw = (W - padL - padR) / buckets.length
-      const grow = reduced ? 1 : Math.min(tMs / 900, 1)
-
+      const bw = Math.min((W - padL - padR) / txs.length, 90)
+      const x0all = padL + ((W - padL - padR) - bw * txs.length) / 2
       const ink = isDark ? 'rgba(226,232,240,' : 'rgba(14,23,38,'
       const pos = isDark ? '16,185,129' : '14,159,110'
       const neg = isDark ? '248,113,113' : '224,36,36'
+      const act = isDark ? '124,154,255' : '48,86,211'
 
       // Bedrock: the no-overdraft floor.
       const floorY = H * 0.94
@@ -86,48 +93,57 @@ export function Strata({ buckets, className = '' }: { buckets: CashflowBucket[];
       ctx.strokeStyle = ink + '0.25)'
       ctx.stroke()
 
-      // Terraces: income up, spending down, in 3 shade steps each.
-      for (let i = 0; i < buckets.length; i++) {
-        const x = padL + i * bw
-        const hInc = (inc[i] / maxBar) * H * 0.34 * grow
-        const hExp = (exp[i] / maxBar) * H * 0.30 * grow
+      // One stratum per posting, growing in from the left.
+      const grow = reduced ? txs.length : Math.min((tMs / 140), txs.length)
+      for (let i = 0; i < Math.ceil(grow); i++) {
+        const x = x0all + i * bw
+        const local = Math.min(grow - i, 1)
+        const h = (amounts[i] / maxBar) * H * 0.32 * local
+        const isTransfer = txs[i].transferId > 0n
+        const color = isTransfer ? act : signs[i] > 0 ? pos : neg
         for (let s = 0; s < 3; s++) {
           const frac = (3 - s) / 3
-          ctx.fillStyle = `rgba(${pos},${0.16 + s * 0.14})`
-          ctx.fillRect(x + 1, baseY - hInc * frac, bw - 2, hInc * frac)
-          ctx.fillStyle = `rgba(${neg},${0.14 + s * 0.12})`
-          ctx.fillRect(x + 1, baseY, bw - 2, hExp * frac)
+          ctx.fillStyle = `rgba(${color},${(isTransfer ? 0.12 : 0.15) + s * 0.13})`
+          if (signs[i] > 0) ctx.fillRect(x + 1.5, baseY - h * frac, bw - 3, h * frac)
+          else ctx.fillRect(x + 1.5, baseY, bw - 3, h * frac)
+        }
+        // Category label on wider columns.
+        if (bw > 46 && local === 1) {
+          ctx.font = '600 9px Space Grotesk Variable, sans-serif'
+          ctx.fillStyle = ink + '0.55)'
+          ctx.textAlign = 'center'
+          const y = signs[i] > 0 ? baseY - h - 5 : baseY + h + 11
+          ctx.fillText(txs[i].category.slice(0, 12), x + bw / 2, y)
         }
       }
 
-      // The gold ridge: running net, stepped.
+      // The gold ridge: running net, stepped, drawn to the growth frontier.
       ctx.beginPath()
-      for (let i = 0; i < buckets.length; i++) {
-        const x0 = padL + i * bw
-        const y = baseY - (nets[i] / maxNet) * H * 0.3 * grow
-        if (i === 0) ctx.moveTo(x0, y)
-        else ctx.lineTo(x0, y)
-        ctx.lineTo(x0 + bw, y)
+      for (let i = 0; i < Math.min(Math.ceil(grow), txs.length); i++) {
+        const x = x0all + i * bw
+        const y = baseY - (nets[i] / maxNet) * H * 0.28
+        if (i === 0) ctx.moveTo(x, y)
+        else ctx.lineTo(x, y)
+        ctx.lineTo(x + bw, y)
       }
       ctx.strokeStyle = isDark ? '#fbbf24' : '#b45309'
       ctx.lineWidth = 2
       ctx.stroke()
 
-      // First / last bucket dates.
       ctx.fillStyle = ink + '0.5)'
       ctx.font = '600 10px Space Grotesk Variable, sans-serif'
       ctx.textAlign = 'left'
-      ctx.fillText(label(buckets[0].bucketStartNs), padL + 2, H - 4)
+      ctx.fillText('first posting', padL + 2, H - 4)
       ctx.textAlign = 'right'
-      ctx.fillText('today', W - padR - 2, H - 4)
+      ctx.fillText('latest', W - padR - 2, H - 4)
     }
 
     function loop(t: number) {
       if (!running) return
       if (visible && !document.hidden) draw(t)
-      if (t < 1200 || !reduced) raf = requestAnimationFrame(loop)
+      raf = requestAnimationFrame(loop)
     }
-    if (reduced) draw(1000)
+    if (reduced) draw(0)
     else raf = requestAnimationFrame(loop)
     return () => {
       running = false
@@ -135,16 +151,12 @@ export function Strata({ buckets, className = '' }: { buckets: CashflowBucket[];
       io.disconnect()
       ro.disconnect()
     }
-  }, [buckets])
+  }, [txs])
 
   return (
     <div ref={host} className={className} role="img"
-      aria-label="Cashflow strata: thirty days of income above the line, spending below, and the running net as a stepped ridge.">
+      aria-label="Ledger strata: every posting as a column — income above the line, spending below, transfers hatched blue — with the running net as a stepped gold ridge.">
       <canvas ref={canvas} />
     </div>
   )
-}
-
-function label(ns: bigint): string {
-  return wallDate(ns).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
