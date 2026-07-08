@@ -2,12 +2,15 @@ import { useState } from 'react'
 import { useQuery } from '@thebes/sdk'
 import { FINANCE_CID, M, decodeBudgets, budgetsArgs, setBudget, type BudgetRow } from '../lib/finance-api'
 import { monthWindow } from '../lib/config'
+import { useCalibrated } from '../lib/useCalibrated'
 import { Money, ProgressBar, Button, Spinner, EmptyState, ErrorNote } from '../components/ui'
 
 export function Budgets() {
+  // The wall→chain window is meaningless before calibration — re-derive when it lands.
+  const cal = useCalibrated()
   const [start, end] = monthWindow()
   const { data, loading, error, refetch } = useQuery<BudgetRow[]>(
-    FINANCE_CID, M.budgets, budgetsArgs(start, end), decodeBudgets,
+    FINANCE_CID, M.budgets, budgetsArgs(start, end), decodeBudgets, [cal ? 1 : 0],
   )
   const [category, setCategory] = useState('')
   const [limit, setLimit] = useState('')
@@ -28,7 +31,9 @@ export function Budgets() {
   }
 
   const rows = data ?? []
-  const monthName = new Date(Number(start / 1_000_000n)).toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
+  // The window IS the current calendar month — label it from the wall clock
+  // (the chain-ns window value is not an epoch timestamp).
+  const monthName = new Date().toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">

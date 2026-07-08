@@ -1,13 +1,39 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@thebes/sdk'
-import { FINANCE_CID, M, decodeAccounts, createAccount, seedDemo, type Account } from '../lib/finance-api'
+import { useEffect } from 'react'
+import {
+  FINANCE_CID, M, M2, decodeAccounts, decodeNetWorth, decodeTxs, txsArgs, query,
+  createAccount, seedDemo, type Account, type NetWorth, type Tx,
+} from '../lib/finance-api'
+import { fmtCents } from '../lib/config'
+import { Strata, type StrataTx } from '../components/Strata'
 import { Money, Button, Spinner, EmptyState, ErrorNote } from '../components/ui'
 
 const KINDS = ['checking', 'savings', 'cash', 'credit'] as const
 
 export function Dashboard() {
   const { data, loading, error, refetch } = useQuery<Account[]>(FINANCE_CID, M.accounts, undefined, decodeAccounts)
+  const worth = useQuery<NetWorth | undefined>(FINANCE_CID, M2.netWorth, undefined, decodeNetWorth)
+  // The strata draw from the caller's full posting sequence, merged across
+  // accounts in time order (each account view is newest-first; we merge then
+  // reverse into ledger order).
+  const [strata, setStrata] = useState<StrataTx[]>([])
+  useEffect(() => {
+    const ids = (data ?? []).map((a) => a.id)
+    if (ids.length === 0) { setStrata([]); return }
+    ;(async () => {
+      const all: Tx[] = []
+      for (const id of ids) {
+        try {
+          const r = await query(FINANCE_CID, M.txs, txsArgs(id))
+          all.push(...decodeTxs(r.reply_hex ?? r.reply ?? ''))
+        } catch { /* an account with no read access never happens for own ids */ }
+      }
+      all.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : Number(a.id - b.id)))
+      setStrata(all.map((t) => ({ kind: t.kind, amountCents: t.amountCents, category: t.category, transferId: t.transferId })))
+    })()
+  }, [data])
   const [open, setOpen] = useState(false)
   const [name, setName] = useState('')
   const [kind, setKind] = useState<(typeof KINDS)[number]>('checking')
@@ -48,13 +74,21 @@ export function Dashboard() {
 
   return (
     <div className="space-y-8">
-      {/* Net-worth hero — the number first; accounts beneath (the Maybe pattern). */}
-      <section className="card p-6">
-        <p className="text-xs uppercase tracking-[0.18em] text-ink-soft">Net worth</p>
-        <p className="font-display mt-1 text-4xl font-bold md:text-5xl">
-          <Money cents={netWorth} />
-        </p>
-        <p className="mt-1 text-sm text-ink-soft nums">{accounts.length} account{accounts.length === 1 ? '' : 's'}</p>
+      {/* Net-worth hero over the strata — thirty days of real cashflow. */}
+      <section className="hero relative overflow-hidden p-6 sm:p-7">
+        <div className="relative z-10">
+          <p className="hero-kicker">Ledger-verified on-chain</p>
+          <p className="font-display mt-2 text-4xl font-bold md:text-5xl">
+            <Money cents={worth.data?.netCents ?? netWorth} />
+          </p>
+          <p className="mt-1 text-sm text-ink-soft nums">
+            net worth · {accounts.length} account{accounts.length === 1 ? '' : 's'}
+            {worth.data && Number(worth.data.creditCents) !== 0 && (
+              <> · ${fmtCents(worth.data.assetsCents)} assets − ${fmtCents(-worth.data.creditCents)} on credit</>
+            )}
+          </p>
+        </div>
+        <Strata txs={strata} className="mt-3 h-[230px] w-full" />
       </section>
 
       <section>

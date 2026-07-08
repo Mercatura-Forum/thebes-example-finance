@@ -3,15 +3,17 @@ import { Link, useParams } from 'react-router-dom'
 import { useQuery, useMediaUpload } from '@thebes/sdk'
 import {
   FINANCE_CID, M, decodeAccounts, decodeTxs, decodeCheck,
-  txsArgs, checkArgs, postTransaction,
+  txsArgs, checkArgs, postTransaction, transfer,
   type Account as Acct, type Tx, type BalanceCheck,
 } from '../lib/finance-api'
 import { MEDIA_CID } from '../lib/config'
+import { wallDate } from '../lib/chainTime'
 import { MediaImage } from '../components/MediaImage'
 import { Money, Sparkline, Button, Spinner, EmptyState, ErrorNote } from '../components/ui'
 
 function when(ns: bigint): string {
-  return new Date(Number(ns / 1_000_000n)).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  // Chain timestamps count from genesis — convert through the calibrated clock.
+  return wallDate(ns).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
 export function AccountPage() {
@@ -27,6 +29,8 @@ export function AccountPage() {
   const [note, setNote] = useState('')
   const [receiptFile, setReceiptFile] = useState<File | null>(null)
   const [busy, setBusy] = useState(false)
+  const [xferTo, setXferTo] = useState('')
+  const [xferAmt, setXferAmt] = useState('')
   const [err, setErr] = useState<string>()
   const media = useMediaUpload(MEDIA_CID)
 
@@ -58,6 +62,17 @@ export function AccountPage() {
     } finally {
       setBusy(false)
     }
+  }
+
+  async function doTransfer() {
+    setBusy(true); setErr(undefined)
+    try {
+      await transfer(accountId, BigInt(xferTo), BigInt(Math.round(Number(xferAmt || '0') * 100)), 'Internal transfer')
+      setXferAmt('')
+      txs.refetch(); check.refetch(); accounts.refetch()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally { setBusy(false) }
   }
 
   if (accounts.loading) return <Spinner label="Loading account" />
@@ -106,6 +121,26 @@ export function AccountPage() {
         {err && <div className="mt-3"><ErrorNote message={err} /></div>}
       </section>
 
+      {/* Transfer between own accounts — double-entry, oracle-checked */}
+      {(accounts.data ?? []).length > 1 && (
+        <section className="card p-4" data-testid="transfer-form">
+          <div className="flex flex-wrap items-end gap-3">
+            <p className="text-sm font-semibold">Move money to</p>
+            <select className="rounded-lg border border-[var(--color-line)] bg-paper px-3 py-2 text-sm"
+              value={xferTo} onChange={(e) => setXferTo(e.target.value)}>
+              <option value="">pick an account…</option>
+              {(accounts.data ?? []).filter((a) => a.id !== accountId).map((a) => (
+                <option key={a.id.toString()} value={a.id.toString()}>{a.name}</option>
+              ))}
+            </select>
+            <input className="w-28 rounded-lg border border-[var(--color-line)] bg-paper px-3 py-2 text-sm nums"
+              placeholder="0.00" inputMode="decimal" value={xferAmt} onChange={(e) => setXferAmt(e.target.value)} />
+            <Button onClick={doTransfer} disabled={busy || !xferTo || !xferAmt}>Transfer</Button>
+            <p className="text-[11px] text-ink-soft">Two legs, one atomic step — the pair always nets zero on the oracle.</p>
+          </div>
+        </section>
+      )}
+
       {/* Ledger */}
       <section>
         <h2 className="mb-2 font-display text-lg font-bold">Transactions</h2>
@@ -120,7 +155,10 @@ export function AccountPage() {
                 <div className="flex min-w-0 items-center gap-3">
                   {t.receiptPath && <MediaImage path={t.receiptPath} alt="receipt" ratio="1 / 1" className="h-10 w-10 shrink-0 rounded-md" />}
                   <div className="min-w-0">
-                    <p className="truncate font-medium">{t.category}</p>
+                    <p className="truncate font-medium">
+                      {t.category}
+                      {t.transferId > 0n && <span className="ml-2 rounded-full bg-[var(--color-act)]/10 px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-act-ink)]">TRANSFER #{t.transferId.toString()}</span>}
+                    </p>
                     {t.note && <p className="truncate text-xs text-ink-soft">{t.note}</p>}
                   </div>
                 </div>

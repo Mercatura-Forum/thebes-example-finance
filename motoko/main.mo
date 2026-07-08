@@ -5,6 +5,7 @@ import Text "mo:core/Text";
 import Principal "mo:core/Principal";
 import Time "mo:core/Time";
 import Array "mo:core/Array";
+import List "mo:core/List";
 import Runtime "mo:core/Runtime";
 import Result "mo:core/Result";
 import Admin "mo:thebes-lib/Admin";
@@ -73,12 +74,15 @@ persistent actor Finance {
     // live here (the storage law).
     receiptPath : ?Text;
     timestamp : Int;
+    // Set on both legs of an internal transfer (1-based); null = standalone.
+    transferId : ?Nat;
   };
 
   public type Budget = { category : Text; limitCents : Nat };
 
   var nextAccountId : Nat = 0;
   var nextTxId : Nat = 0;
+  var nextTransferId : Nat = 1;
 
   // accounts: id -> account; ownerAccounts: principal -> [accountId] (index so a
   // caller's accounts are listed without scanning every account).
@@ -149,6 +153,12 @@ persistent actor Finance {
     caller : Principal, accountId : Nat, kind : TxKind, amountCents : Nat,
     category : Text, note : Text, receiptPath : ?Text,
   ) : Result.Result<Nat, Text> {
+    postTxCoreLinked(caller, accountId, kind, amountCents, category, note, receiptPath, null);
+  };
+  private func postTxCoreLinked(
+    caller : Principal, accountId : Nat, kind : TxKind, amountCents : Nat,
+    category : Text, note : Text, receiptPath : ?Text, transferId : ?Nat,
+  ) : Result.Result<Nat, Text> {
     if (amountCents == 0) return #err("amount must be > 0");
     let account = ownedAccount(caller, accountId);
     let newBalance : Int = account.balanceCents + signedDelta(kind, amountCents);
@@ -160,7 +170,7 @@ persistent actor Finance {
     nextTxId += 1;
     let tx : Transaction = {
       id; accountId; owner = caller; kind; amountCents; category; note; receiptPath;
-      timestamp = Time.now();
+      timestamp = Time.now(); transferId;
     };
     Map.add(transactions, Nat.compare, id, tx);
     // Update the stored balance + the per-account index atomically.
@@ -285,6 +295,43 @@ persistent actor Finance {
     Map.add(cats, Text.compare, category, limitCents);
   };
 
+  // ── Internal transfers: double-entry, atomic, conservation-checked ──
+  // Moves money between two of the CALLER's accounts by writing both legs in
+  // one synchronous step: an #expense on the source and an #income on the
+  // destination, linked by one transferId. The source's overdraft floor is
+  // enforced exactly like any expense; the pair nets zero by construction and
+  // the oracle re-proves it (R4) on every read.
+  private func transferCore(caller : Principal, fromId : Nat, toId : Nat, amountCents : Nat, note : Text) : Result.Result<Nat, Text> {
+    if (fromId == toId) return #err("pick two different accounts");
+    if (amountCents == 0) return #err("amount must be > 0");
+    // Both must be the caller's (ownedAccount traps otherwise — same guard as posting).
+    ignore ownedAccount(caller, fromId);
+    ignore ownedAccount(caller, toId);
+    let tid = nextTransferId;
+    switch (postTxCoreLinked(caller, fromId, #expense, amountCents, "transfer", note, null, ?tid)) {
+      case (#err e) return #err(e);
+      case (#ok _) {};
+    };
+    switch (postTxCoreLinked(caller, toId, #income, amountCents, "transfer", note, null, ?tid)) {
+      case (#err e) {
+        // Unreachable by construction (income has no floor), but never leave a
+        // half-written pair: trap rolls the whole message back atomically.
+        Runtime.trap("transfer could not complete: " # e);
+      };
+      case (#ok _) {};
+    };
+    nextTransferId += 1;
+    #ok(tid);
+  };
+  public shared(msg) func transfer(fromId : Nat, toId : Nat, amountCents : Nat, note : Text) : async Result.Result<Nat, Text> {
+    Admin.requireNotPaused(admin);
+    transferCore(msg.caller, fromId, toId, amountCents, note);
+  };
+  public shared(msg) func transferOrTrap(fromId : Nat, toId : Nat, amountCents : Nat, note : Text) : async Nat {
+    Admin.requireNotPaused(admin);
+    switch (transferCore(msg.caller, fromId, toId, amountCents, note)) { case (#ok t) t; case (#err e) Runtime.trap(e) };
+  };
+
   // Set/replace a soft monthly budget for a category (caller-scoped).
   public shared(msg) func setBudget(category : Text, limitCents : Nat) : async () {
     Admin.requireNotPaused(admin);
@@ -304,6 +351,7 @@ persistent actor Finance {
       case null {};
     };
     let checking = createAccountCore(msg.caller, "Everyday Checking", #checking, 0);
+    let savings = createAccountCore(msg.caller, "Rainy-Day Savings", #savings, 0);
     let card = createAccountCore(msg.caller, "Travel Card", #credit, 200_000);
     ignore postTxCore(msg.caller, checking, #income, 480_000, "salary", "Monthly paycheck", null);
     ignore postTxCore(msg.caller, checking, #expense, 125_050, "groceries", "Weekly shop", null);
@@ -311,6 +359,7 @@ persistent actor Finance {
     ignore postTxCore(msg.caller, checking, #expense, 4_250, "coffee", "Morning flat white", null);
     ignore postTxCore(msg.caller, card, #expense, 32_000, "dining", "Team dinner", null);
     ignore postTxCore(msg.caller, card, #expense, 14_500, "transport", "Airport taxi", null);
+    ignore transferCore(msg.caller, checking, savings, 100_000, "Monthly saving");
     setBudgetCore(msg.caller, "groceries", 60_000);
     setBudgetCore(msg.caller, "dining", 40_000);
     true;
@@ -344,7 +393,7 @@ persistent actor Finance {
   // balance-integrity check + budgets as flat vecs (0-or-1 for the single check).
 
   public type AccountView = { id : Nat; name : Text; kind : Text; balanceCents : Int; creditLimitCents : Nat; createdAt : Int };
-  public type TxView = { id : Nat; accountId : Nat; kind : Text; amountCents : Nat; category : Text; note : Text; receiptPath : Text; timestamp : Int };
+  public type TxView = { id : Nat; accountId : Nat; kind : Text; amountCents : Nat; category : Text; note : Text; receiptPath : Text; timestamp : Int; transferId : Nat };
   public type BudgetView = { category : Text; limitCents : Nat; spentCents : Nat };
   public type BalanceCheck = { stored : Int; recomputed : Int; consistent : Bool };
 
@@ -372,7 +421,7 @@ persistent actor Finance {
     let newestFirst = Array.tabulate<TxView>(n, func(i) {
       let txId = ids[n - 1 - i];
       switch (Map.get(transactions, Nat.compare, txId)) {
-        case (?t) { { id = t.id; accountId = t.accountId; kind = txKindText(t.kind); amountCents = t.amountCents; category = t.category; note = t.note; receiptPath = (switch (t.receiptPath) { case (?s) s; case null "" }); timestamp = t.timestamp } };
+        case (?t) { { id = t.id; accountId = t.accountId; kind = txKindText(t.kind); amountCents = t.amountCents; category = t.category; note = t.note; receiptPath = (switch (t.receiptPath) { case (?s) s; case null "" }); timestamp = t.timestamp; transferId = (switch (t.transferId) { case (?x) x; case null 0 }) } };
         case null { Runtime.trap("dangling tx index") };
       }
     });
@@ -400,5 +449,124 @@ persistent actor Finance {
       };
       { category = cat; limitCents = limit; spentCents = spent }
     })
+  };
+
+  // ── The oracle: four laws over the CALLER's books, and a global seal ─────
+  public shared query(msg) func invariantReportView() : async [{ rule : Text; detail : Text }] {
+    let bad = List.empty<{ rule : Text; detail : Text }>();
+    let ids = switch (Map.get(ownerAccounts, Principal.compare, msg.caller)) { case (?x) x; case null [] };
+    // Collect my transfer legs as we walk the accounts.
+    let transferLegs = Map.empty<Nat, List.List<Transaction>>();
+    for (accId in ids.values()) {
+      switch (Map.get(accounts, Nat.compare, accId)) {
+        case null List.add(bad, { rule = "R3 index"; detail = "account index points at missing account #" # Nat.toText(accId) });
+        case (?a) {
+          if (not Principal.equal(a.owner, msg.caller)) {
+            List.add(bad, { rule = "R3 index"; detail = "account #" # Nat.toText(accId) # " is indexed under the wrong owner" });
+          };
+          var sum : Int = 0;
+          let txIds = switch (Map.get(accountTxs, Nat.compare, accId)) { case (?x) x; case null [] };
+          for (txId in txIds.values()) {
+            switch (Map.get(transactions, Nat.compare, txId)) {
+              case null List.add(bad, { rule = "R3 index"; detail = "tx index points at missing tx #" # Nat.toText(txId) });
+              case (?t) {
+                if (t.accountId != accId) List.add(bad, { rule = "R3 index"; detail = "tx #" # Nat.toText(txId) # " indexed under the wrong account" });
+                sum += signedDelta(t.kind, t.amountCents);
+                switch (t.transferId) {
+                  case (?tid) {
+                    let l = switch (Map.get(transferLegs, Nat.compare, tid)) {
+                      case (?l) l;
+                      case null { let l = List.empty<Transaction>(); Map.add(transferLegs, Nat.compare, tid, l); l };
+                    };
+                    List.add(l, t);
+                  };
+                  case null {};
+                };
+              };
+            };
+          };
+          // R1 balance integrity: the stored balance equals the log.
+          if (sum != a.balanceCents) {
+            List.add(bad, { rule = "R1 balance"; detail = "account #" # Nat.toText(accId) # " stores " # Int.toText(a.balanceCents) # "c but the log sums to " # Int.toText(sum) # "c" });
+          };
+          // R2 overdraft floor holds right now.
+          let floor : Int = -a.creditLimitCents;
+          if (a.balanceCents < floor) {
+            List.add(bad, { rule = "R2 floor"; detail = "account #" # Nat.toText(accId) # " sits below its floor" });
+          };
+        };
+      };
+    };
+    // R4 transfers: every pair nets zero across two distinct accounts.
+    for ((tid, l) in Map.entries(transferLegs)) {
+      let legs = List.toArray(l);
+      if (legs.size() != 2) {
+        List.add(bad, { rule = "R4 transfer"; detail = "transfer #" # Nat.toText(tid) # " has " # Nat.toText(legs.size()) # " leg(s), expected 2" });
+      } else {
+        let net = signedDelta(legs[0].kind, legs[0].amountCents) + signedDelta(legs[1].kind, legs[1].amountCents);
+        if (net != 0) List.add(bad, { rule = "R4 transfer"; detail = "transfer #" # Nat.toText(tid) # " nets " # Int.toText(net) # "c, expected 0" });
+        if (legs[0].accountId == legs[1].accountId) List.add(bad, { rule = "R4 transfer"; detail = "transfer #" # Nat.toText(tid) # " has both legs on one account" });
+      };
+    };
+    List.toArray(bad);
+  };
+
+  // PUBLIC global seal — no per-user data, just the conservation law over the
+  // whole contract: the sum of every stored balance equals the sum of every
+  // signed transaction delta, and no account's log disagrees with its balance.
+  public query func financeSealView() : async [{
+    accounts : Nat; transactions : Nat; storedSumCents : Int; ledgerSumCents : Int;
+    inconsistentAccounts : Nat; checkedAt : Int;
+  }] {
+    var storedSum : Int = 0;
+    var inconsistent : Nat = 0;
+    for ((accId, a) in Map.entries(accounts)) {
+      storedSum += a.balanceCents;
+      var sum : Int = 0;
+      let txIds = switch (Map.get(accountTxs, Nat.compare, accId)) { case (?x) x; case null [] };
+      for (txId in txIds.values()) {
+        switch (Map.get(transactions, Nat.compare, txId)) { case (?t) sum += signedDelta(t.kind, t.amountCents); case null {} };
+      };
+      if (sum != a.balanceCents) inconsistent += 1;
+    };
+    var ledgerSum : Int = 0;
+    for (t in Map.values(transactions)) { ledgerSum += signedDelta(t.kind, t.amountCents) };
+    [{ accounts = Map.size(accounts); transactions = Map.size(transactions); storedSumCents = storedSum; ledgerSumCents = ledgerSum; inconsistentAccounts = inconsistent; checkedAt = Time.now() }];
+  };
+
+  // Net worth across the caller's accounts (assets = non-credit, debt = credit).
+  public shared query(msg) func netWorthView() : async [{
+    assetsCents : Int; creditCents : Int; netCents : Int; accounts : Nat; nowNs : Int;
+  }] {
+    let ids = switch (Map.get(ownerAccounts, Principal.compare, msg.caller)) { case (?x) x; case null [] };
+    var assets : Int = 0; var credit : Int = 0;
+    for (accId in ids.values()) {
+      switch (Map.get(accounts, Nat.compare, accId)) {
+        case (?a) { switch (a.kind) { case (#credit) credit += a.balanceCents; case _ assets += a.balanceCents } };
+        case null {};
+      };
+    };
+    [{ assetsCents = assets; creditCents = credit; netCents = assets + credit; accounts = ids.size(); nowNs = Time.now() }];
+  };
+
+  // Time-bucketed cashflow for the caller over [startNs, endNs), `buckets`
+  // equal windows (capped at 60) — the strata hero draws from this.
+  public shared query(msg) func cashflowView(startNs : Int, endNs : Int, buckets : Nat) : async [{
+    bucketStartNs : Int; incomeCents : Nat; expenseCents : Nat;
+  }] {
+    if (endNs <= startNs) return [];
+    let n = if (buckets == 0) 1 else if (buckets > 60) 60 else buckets;
+    let span = endNs - startNs;
+    Array.tabulate<{ bucketStartNs : Int; incomeCents : Nat; expenseCents : Nat }>(n, func(i) {
+      let b0 = startNs + span * i / n;
+      let b1 = startNs + span * (i + 1) / n;
+      var inc : Nat = 0; var exp : Nat = 0;
+      for (t in Map.values(transactions)) {
+        if (Principal.equal(t.owner, msg.caller) and t.timestamp >= b0 and t.timestamp < b1) {
+          switch (t.kind) { case (#income) inc += t.amountCents; case (#expense) exp += t.amountCents };
+        };
+      };
+      { bucketStartNs = b0; incomeCents = inc; expenseCents = exp };
+    });
   };
 }

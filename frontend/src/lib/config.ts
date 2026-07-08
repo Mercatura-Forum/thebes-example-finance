@@ -24,10 +24,19 @@ export function fmtCents(cents: bigint): string {
   return `${neg ? '−' : ''}${whole}.${frac}`
 }
 
-/** [startNs, endNs) for the current calendar month (for budget windows). */
+import { toChainNs } from './chainTime'
+
+/** [startNs, endNs) for the current calendar month, in CHAIN time — the chain
+ *  counts ns since genesis, so wall-epoch windows would never match. */
 export function monthWindow(): [bigint, bigint] {
   const now = new Date()
   const start = new Date(now.getFullYear(), now.getMonth(), 1).getTime()
   const end = new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime()
-  return [BigInt(start) * 1_000_000n, BigInt(end) * 1_000_000n]
+  return [toChainNs(start), toChainNs(end)]
+}
+
+/** [startNs, endNs) for the trailing `days` days, in chain time. */
+export function trailingWindow(days: number): [bigint, bigint] {
+  const end = Date.now()
+  return [toChainNs(end - days * 86_400_000), toChainNs(end)]
 }
