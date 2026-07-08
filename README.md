@@ -2,10 +2,18 @@
 
 An on-chain personal-finance manager built on
 [Thebes Protocol](https://github.com/Mercatura-Forum/Thebes-Protocol-): a Motoko
-backend that holds each caller's accounts, transactions, and budgets, and a React
-frontend served as certified assets. It demonstrates the full shape of a Thebes
-application — passkey sign-in, controller-gated admin, paginated reads, and
-threshold-signed on-chain state — in one self-contained example.
+backend that holds each caller's accounts, transactions, transfers and budgets,
+and a React frontend served as certified assets.
+
+The property this example proves: **books that always balance.** No posting can
+overdraft an account past its floor; internal transfers are double-entry (both
+legs written in one atomic step, always netting zero); and every stored balance
+is re-provable against its transaction log — by the caller's oracle
+(`invariantReportView`, four laws) and by a privacy-safe **global seal**
+(`financeSealView`: the sum of every stored balance equals the sum of every
+signed posting, contract-wide, with no personal data crossing the surface).
+
+Live demo: <https://memphis.mercaturaforum.com/_/raw/179495140191996/index.html>
 
 ## Architecture
 
