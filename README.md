@@ -1,7 +1,7 @@
 # thebes-example-finance
 
 An on-chain personal-finance manager built on
-[Thebes Protocol](https://github.com/Mercatura-Forum/Thebes-Protocol-): a Motoko
+[Thebes Protocol](https://thebesprotocol.com): a Motoko
 backend that holds each caller's accounts, transactions, transfers and budgets,
 and a React frontend served as certified assets.
 
