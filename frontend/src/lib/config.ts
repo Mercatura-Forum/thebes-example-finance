@@ -10,10 +10,10 @@ declare global {
 }
 
 export const FINANCE_CID: number =
-  (typeof window !== 'undefined' && window.FINANCE_CID) || 0
+  (typeof window !== 'undefined' && window.FINANCE_CID) || 153572387472391
 
 export const MEDIA_CID: number =
-  (typeof window !== 'undefined' && window.MEDIA_CID) || 0
+  (typeof window !== 'undefined' && window.MEDIA_CID) || 169634844096849
 
 /** Format integer cents → grouped 2-decimal string, with a leading minus. */
 export function fmtCents(cents: bigint): string {
